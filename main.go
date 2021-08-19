@@ -16,40 +16,6 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 )
 
-func checkFileUpdated(fileRealPath string, fileUpdated chan bool) {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Println("Failed fsnotify.NewWatcher")
-		return
-	}
-	defer watcher.Close()
-
-	done := make(chan bool)
-	go func() {
-		//Give a true value to updated so it reads the file the first time.
-		fileUpdated <- true
-		for {
-			select {
-			case event := <-watcher.Events:
-				log.Println("event:", event)
-				if event.Op&fsnotify.Write == fsnotify.Write {
-					log.Println("modified file:", event.Name)
-					//testing with an update chan to get updates
-					fileUpdated <- true
-				}
-			case err := <-watcher.Errors:
-				log.Println("error:", err)
-			}
-		}
-	}()
-
-	err = watcher.Add(fileRealPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	<-done
-}
-
 func main() {
 	daemon := flag.Bool("daemon", false, "Set to true do run in daemon mode. The certificate will be automatically renewed 30 days before it expires, and the corresponding .key and .crt file will be updated .")
 
@@ -94,6 +60,7 @@ func main() {
 		err = server.ListenAndServeTLS("", "")
 		if err != nil {
 			log.Printf("error: ListenAndServe: %v\n", err)
+			return
 		}
 	}()
 
@@ -114,7 +81,7 @@ func main() {
 		case <-fileUpdated:
 			err := handleCertFiles(certRealPath)
 			if err != nil {
-				log.Printf("%v\n", err)
+				log.Printf("error: handleCertFiles:%v\n", err)
 				os.Exit(1)
 			}
 		case <-sigCh:
@@ -202,4 +169,41 @@ func handleCertFiles(certRealPath string) error {
 	}
 
 	return nil
+}
+
+func checkFileUpdated(fileRealPath string, fileUpdated chan bool) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Printf("Failed fsnotify.NewWatcher %v\n", err)
+		return
+	}
+	defer watcher.Close()
+
+	done := make(chan bool)
+	go func() {
+		//Give a true value to updated so it reads the file the first time.
+		fileUpdated <- true
+		for {
+			select {
+			case event := <-watcher.Events:
+				log.Printf("event: %v\n", event)
+				if event.Op&fsnotify.Write == fsnotify.Write {
+					log.Println("modified file:", event.Name)
+					//testing with an update chan to get updates
+					fileUpdated <- true
+				}
+			case err := <-watcher.Errors:
+				log.Println("error:", err)
+			}
+		}
+	}()
+
+	fmt.Println("fileRealPath: ", fileRealPath)
+	err = watcher.Add(fileRealPath)
+	if err != nil {
+		log.Fatalf("checkFileUpdated: watcher.Add: %v\n", err)
+		os.Exit(1)
+	}
+
+	<-done
 }
