@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/crypto/acme/autocert"
@@ -19,7 +20,7 @@ import (
 func main() {
 	daemon := flag.Bool("daemon", false, "Set to true do run in daemon mode. The certificate will be automatically renewed 30 days before it expires, and the corresponding .key and .crt file will be updated .")
 
-	certDir := flag.String("certDir", "", "specify the full path of where to store the key and certificate")
+	userFolder := flag.String("userFolder", "", "specify the full path of where to store the key and certificate")
 	domain := flag.String("domain", "", "the domain name to create a certificate for")
 	flag.Parse()
 
@@ -28,20 +29,24 @@ func main() {
 		fmt.Fprintf(w, "Hello, TLS user! Your config: %+v", r.TLS)
 	})
 
-	dirPath := path.Join(*certDir, *domain)
-	_, err := os.Stat(dirPath)
+	// Check if the folder for where to store the certificate
+	// exist, if not exist create it.
+	certDir := path.Join(*userFolder, *domain)
+	_, err := os.Stat(certDir)
 	if err != nil {
-		err := os.MkdirAll(dirPath, 0700)
+		err := os.MkdirAll(certDir, 0700)
 		if err != nil {
 			log.Printf("error: os.MkdirAll: %v\n", err)
 			return
 		}
 	}
 
+	// --- Prepare and start the web http and https servers.
+
 	certManager := autocert.Manager{
 		Prompt:     autocert.AcceptTOS,
 		HostPolicy: autocert.HostWhitelist(*domain),
-		Cache:      autocert.DirCache(dirPath),
+		Cache:      autocert.DirCache(certDir),
 	}
 
 	server := &http.Server{
@@ -64,10 +69,41 @@ func main() {
 		}
 	}()
 
-	// The cert+key are stored in a file named by the domain.
-	certRealPath := path.Join(dirPath, *domain)
+	// --- Start up a client session to initiate the creation of the certificate.
 
-	fileUpdated := make(chan bool)
+	client := http.Client{
+		Timeout: time.Second * 30,
+	}
+
+	url := fmt.Sprintf("https://%v", *domain)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		log.Printf("error: http.NewRequest: %v\n", err)
+		return
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("error: client.Do: %v\n", err)
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if err != nil {
+			log.Printf("error: http.StatusCode not 200: %v\n", err)
+			return
+		}
+	}
+
+	// --- Check and create crt/key files if LE file is created.
+
+	// The cert+key are stored in a file named by the domain.
+	certRealPath := path.Join(certDir, *domain)
+
+	// Start checking that if an actual certificate have been
+	// created or updated, and give notification on the file
+	// updated when occured.
+	fileUpdated := make(chan bool, 1)
 	go checkFileUpdated(certRealPath, fileUpdated)
 
 	// Set up channel on which to send signal notifications.
@@ -79,6 +115,7 @@ func main() {
 	for {
 		select {
 		case <-fileUpdated:
+			fmt.Println(" * Debug: case updated")
 			err := handleCertFiles(certRealPath)
 			if err != nil {
 				log.Printf("error: handleCertFiles:%v\n", err)
@@ -96,6 +133,8 @@ func main() {
 
 }
 
+// handleCertFiles will create the crt and key files based on
+// the certificate received from LetsEncrypt.
 func handleCertFiles(certRealPath string) error {
 	// Open key+cert file for reading
 	fhKeyCert, err := os.Open(certRealPath)
@@ -171,7 +210,15 @@ func handleCertFiles(certRealPath string) error {
 	return nil
 }
 
-func checkFileUpdated(fileRealPath string, fileUpdated chan bool) {
+func checkFileUpdated(certRealPath string, fileUpdated chan bool) {
+
+	err := waitUntilFind(certRealPath)
+	if err != nil {
+		log.Printf("error: waitUntilFind failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(" * cert file from lets encrypt found")
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Printf("Failed fsnotify.NewWatcher %v\n", err)
@@ -188,7 +235,7 @@ func checkFileUpdated(fileRealPath string, fileUpdated chan bool) {
 			case event := <-watcher.Events:
 				log.Printf("event: %v\n", event)
 				if event.Op&fsnotify.Write == fsnotify.Write {
-					log.Println("modified file:", event.Name)
+					log.Println(" * checkFileUpdated: modified file:", event.Name)
 					//testing with an update chan to get updates
 					fileUpdated <- true
 				}
@@ -198,12 +245,29 @@ func checkFileUpdated(fileRealPath string, fileUpdated chan bool) {
 		}
 	}()
 
-	fmt.Println("fileRealPath: ", fileRealPath)
-	err = watcher.Add(fileRealPath)
+	err = watcher.Add(certRealPath)
 	if err != nil {
 		log.Fatalf("checkFileUpdated: watcher.Add: %v\n", err)
 		os.Exit(1)
 	}
 
 	<-done
+}
+
+// Check that the file exists, if not wait a second
+// and check again until found.
+func waitUntilFind(filename string) error {
+	for {
+		time.Sleep(1 * time.Second)
+		_, err := os.Stat(filename)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			} else {
+				return err
+			}
+		}
+		break
+	}
+	return nil
 }
