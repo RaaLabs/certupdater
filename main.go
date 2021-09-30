@@ -48,7 +48,7 @@ func main() {
 	acmeClient := &acme.Client{}
 	if !*prod {
 		acmeClient = &acme.Client{
-			DirectoryURL: "https://acme-staging.api.letsencrypt.org/directory",
+			DirectoryURL: "https://acme-staging-v02.api.letsencrypt.org/directory",
 		}
 	}
 
