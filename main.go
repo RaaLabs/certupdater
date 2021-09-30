@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -22,6 +23,8 @@ func main() {
 
 	userFolder := flag.String("userFolder", "", "specify the full path of where to store the key and certificate")
 	domain := flag.String("domain", "", "the domain name to create a certificate for")
+	prod := flag.Bool("prod", false, "set to true for prod server for letsencrypt, default false is staging")
+
 	flag.Parse()
 
 	mux := http.NewServeMux()
@@ -42,11 +45,18 @@ func main() {
 	}
 
 	// --- Prepare and start the web http and https servers.
+	acmeClient := &acme.Client{}
+	if !*prod {
+		acmeClient = &acme.Client{
+			DirectoryURL: "https://acme-staging.api.letsencrypt.org/directory",
+		}
+	}
 
 	certManager := autocert.Manager{
 		Prompt:     autocert.AcceptTOS,
 		HostPolicy: autocert.HostWhitelist(*domain),
 		Cache:      autocert.DirCache(certDir),
+		Client:     acmeClient,
 	}
 
 	server := &http.Server{
